@@ -131,9 +131,12 @@ class MsckfVio {
     void batchImuProcessing(
         const double& time_bound);
     void processModel(const double& time,
+        IMUState *imu_state_arg,
+        Eigen::MatrixXd *state_cov_arg,
         const Eigen::Vector3d& m_gyro,
         const Eigen::Vector3d& m_acc);
     void predictNewState(const double& dt,
+        IMUState *imu_state_arg,
         const Eigen::Vector3d& gyro,
         const Eigen::Vector3d& acc);
 

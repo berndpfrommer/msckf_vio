@@ -509,9 +509,11 @@ void MsckfVio::batchImuProcessing(const double& time_bound) {
   // Counter how many IMU msgs in the buffer are used.
   int used_imu_msg_cntr = 0;
 
+  IMUState &imu_state = state_server.imu_state;
+
   for (const auto& imu_msg : imu_msg_buffer) {
     double imu_time = imu_msg.header.stamp.toSec();
-    if (imu_time < state_server.imu_state.time) {
+    if (imu_time < imu_state.time) {
       ++used_imu_msg_cntr;
       continue;
     }
@@ -523,12 +525,13 @@ void MsckfVio::batchImuProcessing(const double& time_bound) {
     tf::vectorMsgToEigen(imu_msg.linear_acceleration, m_acc);
 
     // Execute process model.
-    processModel(imu_time, m_gyro, m_acc);
+    processModel(imu_time, &imu_state,
+                 &state_server.state_cov, m_gyro, m_acc);
     ++used_imu_msg_cntr;
   }
 
   // Set the state ID for the new IMU state.
-  state_server.imu_state.id = IMUState::next_id++;
+  imu_state.id = IMUState::next_id++;
 
   // Remove all used IMU msgs.
   imu_msg_buffer.erase(imu_msg_buffer.begin(),
@@ -538,11 +541,15 @@ void MsckfVio::batchImuProcessing(const double& time_bound) {
 }
 
 void MsckfVio::processModel(const double& time,
+    IMUState *imu_state_arg,
+    Eigen::MatrixXd *state_cov_arg,
     const Vector3d& m_gyro,
     const Vector3d& m_acc) {
 
+  IMUState&        imu_state = *imu_state_arg;
+  Eigen::MatrixXd& state_cov = *state_cov_arg;
+
   // Remove the bias from the measured gyro and acceleration
-  IMUState& imu_state = state_server.imu_state;
   Vector3d gyro = m_gyro - imu_state.gyro_bias;
   Vector3d acc = m_acc - imu_state.acc_bias;
   double dtime = time - imu_state.time;
@@ -575,7 +582,7 @@ void MsckfVio::processModel(const double& time,
     Fdt + 0.5*Fdt_square + (1.0/6.0)*Fdt_cube;
 
   // Propogate the state using 4th order Runge-Kutta
-  predictNewState(dtime, gyro, acc);
+  predictNewState(dtime, &imu_state, gyro, acc);
 
   // Modify the transition matrix
   Matrix3d R_kk_1 = quaternionToRotation(imu_state.orientation_null);
@@ -599,23 +606,20 @@ void MsckfVio::processModel(const double& time,
   // Propogate the state covariance matrix.
   Matrix<double, 21, 21> Q = Phi*G*state_server.continuous_noise_cov*
     G.transpose()*Phi.transpose()*dtime;
-  state_server.state_cov.block<21, 21>(0, 0) =
-    Phi*state_server.state_cov.block<21, 21>(0, 0)*Phi.transpose() + Q;
+  state_cov.block<21, 21>(0, 0) =
+    Phi*state_cov.block<21, 21>(0, 0)*Phi.transpose() + Q;
 
   if (state_server.cam_states.size() > 0) {
-    state_server.state_cov.block(
-        0, 21, 21, state_server.state_cov.cols()-21) =
-      Phi * state_server.state_cov.block(
-        0, 21, 21, state_server.state_cov.cols()-21);
-    state_server.state_cov.block(
-        21, 0, state_server.state_cov.rows()-21, 21) =
-      state_server.state_cov.block(
-        21, 0, state_server.state_cov.rows()-21, 21) * Phi.transpose();
+    state_cov.block(0, 21, 21, state_cov.cols()-21) =
+      Phi * state_cov.block(0, 21, 21, state_cov.cols()-21);
+    state_cov.block(21, 0, state_cov.rows()-21, 21) =
+      state_cov.block(21, 0, state_cov.rows()-21, 21) *
+      Phi.transpose();
   }
 
-  MatrixXd state_cov_fixed = (state_server.state_cov +
-      state_server.state_cov.transpose()) / 2.0;
-  state_server.state_cov = state_cov_fixed;
+  MatrixXd state_cov_fixed = (state_cov +
+      state_cov.transpose()) / 2.0;
+  state_cov = state_cov_fixed;
 
   // Update the state correspondes to null space.
   imu_state.orientation_null = imu_state.orientation;
@@ -623,14 +627,16 @@ void MsckfVio::processModel(const double& time,
   imu_state.velocity_null = imu_state.velocity;
 
   // Update the state info
-  state_server.imu_state.time = time;
+  imu_state.time = time;
   return;
 }
 
 void MsckfVio::predictNewState(const double& dt,
+    IMUState *imu_state_arg,
     const Vector3d& gyro,
     const Vector3d& acc) {
 
+  IMUState &imu_state = *imu_state_arg;
   // TODO: Will performing the forward integration using
   //    the inverse of the quaternion give better accuracy?
   double gyro_norm = gyro.norm();
@@ -639,9 +645,9 @@ void MsckfVio::predictNewState(const double& dt,
   Omega.block<3, 1>(0, 3) = gyro;
   Omega.block<1, 3>(3, 0) = -gyro;
 
-  Vector4d& q = state_server.imu_state.orientation;
-  Vector3d& v = state_server.imu_state.velocity;
-  Vector3d& p = state_server.imu_state.position;
+  Vector4d& q = imu_state.orientation;
+  Vector3d& v = imu_state.velocity;
+  Vector3d& p = imu_state.position;
 
   // Some pre-calculation
   Vector4d dq_dt, dq_dt2;
