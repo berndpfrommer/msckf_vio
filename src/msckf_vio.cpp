@@ -408,7 +408,8 @@ void MsckfVio::featureCallback(
 
   // Publish the odometry.
   start_time = ros::Time::now();
-  publish(msg->header.stamp);
+  publish(msg->header.stamp, state_server.imu_state,
+          state_server.state_cov);
   double publish_time = (
       ros::Time::now()-start_time).toSec();
 
@@ -1368,10 +1369,10 @@ void MsckfVio::onlineReset() {
   return;
 }
 
-void MsckfVio::publish(const ros::Time& time) {
+void MsckfVio::publish(const ros::Time& time, const IMUState &imu_state,
+    const Eigen::MatrixXd  &state_cov) {
 
   // Convert the IMU frame to the body frame.
-  const IMUState& imu_state = state_server.imu_state;
   Eigen::Isometry3d T_i_w = Eigen::Isometry3d::Identity();
   T_i_w.linear() = quaternionToRotation(
       imu_state.orientation).transpose();
@@ -1400,10 +1401,10 @@ void MsckfVio::publish(const ros::Time& time) {
   tf::vectorEigenToMsg(body_velocity, odom_msg.twist.twist.linear);
 
   // Convert the covariance.
-  Matrix3d P_oo = state_server.state_cov.block<3, 3>(0, 0);
-  Matrix3d P_op = state_server.state_cov.block<3, 3>(0, 12);
-  Matrix3d P_po = state_server.state_cov.block<3, 3>(12, 0);
-  Matrix3d P_pp = state_server.state_cov.block<3, 3>(12, 12);
+  Matrix3d P_oo = state_cov.block<3, 3>(0, 0);
+  Matrix3d P_op = state_cov.block<3, 3>(0, 12);
+  Matrix3d P_po = state_cov.block<3, 3>(12, 0);
+  Matrix3d P_pp = state_cov.block<3, 3>(12, 12);
   Matrix<double, 6, 6> P_imu_pose = Matrix<double, 6, 6>::Zero();
   P_imu_pose << P_pp, P_po, P_op, P_oo;
 
@@ -1418,7 +1419,7 @@ void MsckfVio::publish(const ros::Time& time) {
       odom_msg.pose.covariance[6*i+j] = P_body_pose(i, j);
 
   // Construct the covariance for the velocity.
-  Matrix3d P_imu_vel = state_server.state_cov.block<3, 3>(6, 6);
+  Matrix3d P_imu_vel = state_cov.block<3, 3>(6, 6);
   Matrix3d H_vel = IMUState::T_imu_body.linear();
   Matrix3d P_body_vel = H_vel * P_imu_vel * H_vel.transpose();
   for (int i = 0; i < 3; ++i)

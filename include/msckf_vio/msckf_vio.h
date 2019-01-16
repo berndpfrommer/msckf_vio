@@ -107,7 +107,8 @@ class MsckfVio {
      * @brief publish Publish the results of VIO.
      * @param time The time stamp of output msgs.
      */
-    void publish(const ros::Time& time);
+    void publish(const ros::Time& time, const IMUState &imu_state,
+        const Eigen::MatrixXd  &state_cov);
 
     /*
      * @brief initializegravityAndBias
