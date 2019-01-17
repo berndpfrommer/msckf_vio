@@ -259,7 +259,7 @@ void MsckfVio::imuCallback(
     processModel(imu_time, &imu_state_intermediate,
                  &state_cov_intermediate, m_gyro, m_acc);
     publish(msg->header.stamp, imu_state_intermediate,
-            state_cov_intermediate);
+            state_cov_intermediate, "ovc/imu_rt");
   }
 
   return;
@@ -429,7 +429,7 @@ void MsckfVio::featureCallback(
   // Publish the odometry.
   start_time = ros::Time::now();
   publish(msg->header.stamp, state_server.imu_state,
-          state_server.state_cov);
+          state_server.state_cov, child_frame_id);
   double publish_time = (
       ros::Time::now()-start_time).toSec();
 
@@ -1393,7 +1393,7 @@ void MsckfVio::onlineReset() {
 }
 
 void MsckfVio::publish(const ros::Time& time, const IMUState &imu_state,
-    const Eigen::MatrixXd  &state_cov) {
+                       const Eigen::MatrixXd  &state_cov, const std::string &child_fr_id) {
 
   // Convert the IMU frame to the body frame.
   Eigen::Isometry3d T_i_w = Eigen::Isometry3d::Identity();
@@ -1411,14 +1411,14 @@ void MsckfVio::publish(const ros::Time& time, const IMUState &imu_state,
     tf::Transform T_b_w_tf;
     tf::transformEigenToTF(T_b_w, T_b_w_tf);
     tf_pub.sendTransform(tf::StampedTransform(
-          T_b_w_tf, time, fixed_frame_id, child_frame_id));
+          T_b_w_tf, time, fixed_frame_id, child_fr_id));
   }
 
   // Publish the odometry
   nav_msgs::Odometry odom_msg;
   odom_msg.header.stamp = time;
   odom_msg.header.frame_id = fixed_frame_id;
-  odom_msg.child_frame_id = child_frame_id;
+  odom_msg.child_frame_id = child_fr_id;
 
   tf::poseEigenToMsg(T_b_w, odom_msg.pose.pose);
   tf::vectorEigenToMsg(body_velocity, odom_msg.twist.twist.linear);

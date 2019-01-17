@@ -109,7 +109,7 @@ class MsckfVio {
      * @param time The time stamp of output msgs.
      */
     void publish(const ros::Time& time, const IMUState &imu_state,
-        const Eigen::MatrixXd  &state_cov);
+                 const Eigen::MatrixXd  &state_cov, const std::string &child_fr_id);
 
     /*
      * @brief initializegravityAndBias
