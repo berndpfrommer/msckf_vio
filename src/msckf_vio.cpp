@@ -141,6 +141,8 @@ bool MsckfVio::loadParameters() {
 
   // Maximum number of camera states to be stored
   nh.param<int>("max_cam_state_size", max_cam_state_size, 30);
+  // If imu-based state updates should be published right away
+  nh.param<bool>("publish_on_imu_update", publish_on_imu_update, false);
 
   ROS_INFO("===========================================");
   ROS_INFO("fixed frame id: %s", fixed_frame_id.c_str());
@@ -240,6 +242,24 @@ void MsckfVio::imuCallback(
     //if (imu_msg_buffer.size() < 10) return;
     initializeGravityAndBias();
     is_gravity_set = true;
+  }
+
+  //
+  // If requested, advance state inbetween feature
+  // callbacks, and publish update right away
+  //
+  if (publish_on_imu_update && state_cov_intermediate.rows() > 0) {
+    // Convert the msgs.
+    Vector3d m_gyro, m_acc;
+    tf::vectorMsgToEigen(msg->angular_velocity, m_gyro);
+    tf::vectorMsgToEigen(msg->linear_acceleration, m_acc);
+
+    const double imu_time = msg->header.stamp.toSec();
+    // Execute process model one time
+    processModel(imu_time, &imu_state_intermediate,
+                 &state_cov_intermediate, m_gyro, m_acc);
+    publish(msg->header.stamp, imu_state_intermediate,
+            state_cov_intermediate);
   }
 
   return;
@@ -416,6 +436,14 @@ void MsckfVio::featureCallback(
   // Reset the system if necessary.
   onlineReset();
 
+  if (publish_on_imu_update) {
+    // Make a copy of the state so it can
+    // be advanced inbetween feature callbacks
+    imu_state_intermediate = state_server.imu_state;
+    state_cov_intermediate = state_server.state_cov;
+  }
+
+
   double processing_end_time = ros::Time::now().toSec();
   double processing_time =
     processing_end_time - processing_start_time;
@@ -542,18 +570,15 @@ void MsckfVio::batchImuProcessing(const double& time_bound) {
 }
 
 void MsckfVio::processModel(const double& time,
-    IMUState *imu_state_arg,
-    Eigen::MatrixXd *state_cov_arg,
+    IMUState *imu_state,
+    Eigen::MatrixXd *state_cov,
     const Vector3d& m_gyro,
     const Vector3d& m_acc) {
 
-  IMUState&        imu_state = *imu_state_arg;
-  Eigen::MatrixXd& state_cov = *state_cov_arg;
-
   // Remove the bias from the measured gyro and acceleration
-  Vector3d gyro = m_gyro - imu_state.gyro_bias;
-  Vector3d acc = m_acc - imu_state.acc_bias;
-  double dtime = time - imu_state.time;
+  Vector3d gyro = m_gyro - imu_state->gyro_bias;
+  Vector3d acc = m_acc - imu_state->acc_bias;
+  double dtime = time - imu_state->time;
 
   // Compute discrete transition and noise covariance matrix
   Matrix<double, 21, 21> F = Matrix<double, 21, 21>::Zero();
@@ -562,15 +587,15 @@ void MsckfVio::processModel(const double& time,
   F.block<3, 3>(0, 0) = -skewSymmetric(gyro);
   F.block<3, 3>(0, 3) = -Matrix3d::Identity();
   F.block<3, 3>(6, 0) = -quaternionToRotation(
-      imu_state.orientation).transpose()*skewSymmetric(acc);
+      imu_state->orientation).transpose()*skewSymmetric(acc);
   F.block<3, 3>(6, 9) = -quaternionToRotation(
-      imu_state.orientation).transpose();
+      imu_state->orientation).transpose();
   F.block<3, 3>(12, 6) = Matrix3d::Identity();
 
   G.block<3, 3>(0, 0) = -Matrix3d::Identity();
   G.block<3, 3>(3, 3) = Matrix3d::Identity();
   G.block<3, 3>(6, 6) = -quaternionToRotation(
-      imu_state.orientation).transpose();
+      imu_state->orientation).transpose();
   G.block<3, 3>(9, 9) = Matrix3d::Identity();
 
   // Approximate matrix exponential to the 3rd order,
@@ -583,61 +608,59 @@ void MsckfVio::processModel(const double& time,
     Fdt + 0.5*Fdt_square + (1.0/6.0)*Fdt_cube;
 
   // Propogate the state using 4th order Runge-Kutta
-  predictNewState(dtime, &imu_state, gyro, acc);
+  predictNewState(dtime, imu_state, gyro, acc);
 
   // Modify the transition matrix
-  Matrix3d R_kk_1 = quaternionToRotation(imu_state.orientation_null);
+  Matrix3d R_kk_1 = quaternionToRotation(imu_state->orientation_null);
   Phi.block<3, 3>(0, 0) =
-    quaternionToRotation(imu_state.orientation) * R_kk_1.transpose();
+    quaternionToRotation(imu_state->orientation) * R_kk_1.transpose();
 
   Vector3d u = R_kk_1 * IMUState::gravity;
   RowVector3d s = (u.transpose()*u).inverse() * u.transpose();
 
   Matrix3d A1 = Phi.block<3, 3>(6, 0);
   Vector3d w1 = skewSymmetric(
-      imu_state.velocity_null-imu_state.velocity) * IMUState::gravity;
+      imu_state->velocity_null-imu_state->velocity) * IMUState::gravity;
   Phi.block<3, 3>(6, 0) = A1 - (A1*u-w1)*s;
 
   Matrix3d A2 = Phi.block<3, 3>(12, 0);
   Vector3d w2 = skewSymmetric(
-      dtime*imu_state.velocity_null+imu_state.position_null-
-      imu_state.position) * IMUState::gravity;
+      dtime*imu_state->velocity_null+imu_state->position_null-
+      imu_state->position) * IMUState::gravity;
   Phi.block<3, 3>(12, 0) = A2 - (A2*u-w2)*s;
 
   // Propogate the state covariance matrix.
-  Matrix<double, 21, 21> Q = Phi*G*state_server.continuous_noise_cov*
+  const Matrix<double, 21, 21> Q = Phi*G*state_server.continuous_noise_cov*
     G.transpose()*Phi.transpose()*dtime;
-  state_cov.block<21, 21>(0, 0) =
-    Phi*state_cov.block<21, 21>(0, 0)*Phi.transpose() + Q;
+  state_cov->block<21, 21>(0, 0) = Phi * state_cov->block<21, 21>(0, 0) * Phi.transpose() + Q;
 
   if (state_server.cam_states.size() > 0) {
-    state_cov.block(0, 21, 21, state_cov.cols()-21) =
-      Phi * state_cov.block(0, 21, 21, state_cov.cols()-21);
-    state_cov.block(21, 0, state_cov.rows()-21, 21) =
-      state_cov.block(21, 0, state_cov.rows()-21, 21) *
+    state_cov->block(0, 21, 21, state_cov->cols()-21) =
+      Phi * state_cov->block(0, 21, 21, state_cov->cols()-21);
+    state_cov->block(21, 0, state_cov->rows()-21, 21) =
+      state_cov->block(21, 0, state_cov->rows()-21, 21) *
       Phi.transpose();
   }
 
-  MatrixXd state_cov_fixed = (state_cov +
-      state_cov.transpose()) / 2.0;
-  state_cov = state_cov_fixed;
+  MatrixXd state_cov_fixed = (*state_cov +
+                              state_cov->transpose()) / 2.0;
+  *state_cov = state_cov_fixed;
 
   // Update the state correspondes to null space.
-  imu_state.orientation_null = imu_state.orientation;
-  imu_state.position_null = imu_state.position;
-  imu_state.velocity_null = imu_state.velocity;
+  imu_state->orientation_null = imu_state->orientation;
+  imu_state->position_null = imu_state->position;
+  imu_state->velocity_null = imu_state->velocity;
 
   // Update the state info
-  imu_state.time = time;
+  imu_state->time = time;
   return;
 }
 
 void MsckfVio::predictNewState(const double& dt,
-    IMUState *imu_state_arg,
+    IMUState *imu_state,
     const Vector3d& gyro,
     const Vector3d& acc) {
 
-  IMUState &imu_state = *imu_state_arg;
   // TODO: Will performing the forward integration using
   //    the inverse of the quaternion give better accuracy?
   double gyro_norm = gyro.norm();
@@ -646,9 +669,9 @@ void MsckfVio::predictNewState(const double& dt,
   Omega.block<3, 1>(0, 3) = gyro;
   Omega.block<1, 3>(3, 0) = -gyro;
 
-  Vector4d& q = imu_state.orientation;
-  Vector3d& v = imu_state.velocity;
-  Vector3d& p = imu_state.position;
+  Vector4d& q = imu_state->orientation;
+  Vector3d& v = imu_state->velocity;
+  Vector3d& p = imu_state->position;
 
   // Some pre-calculation
   Vector4d dq_dt, dq_dt2;

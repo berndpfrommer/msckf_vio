@@ -68,6 +68,7 @@ class MsckfVio {
      *    model.
      */
     struct StateServer {
+      EIGEN_MAKE_ALIGNED_OPERATOR_NEW
       IMUState imu_state;
       CamStateServer cam_states;
 
@@ -172,6 +173,11 @@ class MsckfVio {
 
     // State vector
     StateServer state_server;
+
+    // Copy of IMU state and cov for intermediate updates
+    IMUState         imu_state_intermediate;
+    Eigen::MatrixXd  state_cov_intermediate;
+
     // Maximum number of camera states
     int max_cam_state_size;
 
@@ -219,6 +225,9 @@ class MsckfVio {
     // Frame id
     std::string fixed_frame_id;
     std::string child_frame_id;
+
+    // Whether to publish immediatelyon IMU update
+    bool publish_on_imu_update;
 
     // Whether to publish tf or not.
     bool publish_tf;
